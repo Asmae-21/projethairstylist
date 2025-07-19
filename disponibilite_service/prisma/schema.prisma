@@ -9,7 +9,7 @@ datasource db {
 
 model Disponibilite {
   id          Int    @id @default(autoincrement())
-  date        String
+  date        DateTime
   heure       String
   is_reserved Boolean @default(false)
 }

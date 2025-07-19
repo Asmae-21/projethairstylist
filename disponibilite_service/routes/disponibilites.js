@@ -16,6 +16,22 @@ module.exports = (prisma) => {
     }
   });
 
+  // GET /disponibilites/:id - get a single slot by ID
+  router.get('/:id', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const slot = await prisma.disponibilite.findUnique({
+        where: { id },
+      });
+      if (!slot) {
+        return res.status(404).json({ error: 'Slot not found' });
+      }
+      res.json(slot);
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // POST /disponibilites - admin only, add new slot
   router.post('/', authenticateJWT, (req, res, next) => {
     if (req.user.role !== 'admin') {
@@ -23,17 +39,25 @@ module.exports = (prisma) => {
     }
     next();
   }, async (req, res) => {
-    console.log('req.user in POST /disponibilites:', req.user); // Debug log
     const { date, heure } = req.body;
     if (!date || !heure) {
       return res.status(400).json({ error: 'date and heure are required' });
     }
     try {
+      const parsedDate = new Date(date);
+      if (isNaN(parsedDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid date format' });
+      }
       const newSlot = await prisma.disponibilite.create({
-        data: { date, heure, is_reserved: false },
+        data: { 
+          date: parsedDate,
+          heure,
+          is_reserved: false 
+        },
       });
       res.status(201).json(newSlot);
     } catch (err) {
+      console.error('Error creating slot:', err);
       res.status(500).json({ error: 'Server error' });
     }
   });

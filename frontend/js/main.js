@@ -26,6 +26,30 @@ function decodeJWT(token) {
     return null;
   }
 }
+
+async function fetchDisponibilites() {
+  try {
+    // Always fetch fresh data from the server - no caching
+    const slotsRes = await fetch(`${DISPONIBILITE_SERVICE}/disponibilites`, {
+      method: 'GET',
+      headers: {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Accept': 'application/json'
+      }
+    });
+    if (!slotsRes.ok) {
+      throw new Error('Failed to fetch slots');
+    }
+    const slots = await slotsRes.json();
+    return slots;
+  } catch (err) {
+    console.error('Error fetching slots:', err);
+    throw err;
+  }
+}
+
 function authHeaders() {
   return {
     'Authorization': 'Bearer ' + getToken(),
@@ -277,33 +301,77 @@ jQuery(document).ready(function($) {
 	    headers: { 'Content-Type': 'application/json' },
 	    body: JSON.stringify({ name, email, password, role }),
 	  });
-
-
-
-
 	  
-	  if (!res.ok) throw new Error('Registration failed');
+	  if (!res.ok) {
+	    const error = await res.json().catch(() => ({}));
+	    throw new Error(error.message || 'Registration failed');
+	  }
 	  return res.json();
 	}
 
 	async function loginUser(email, password) {
-	  const res = await fetch(`${USER_SERVICE}/auth/login`, {
-	    method: 'POST',
-	    headers: { 'Content-Type': 'application/json' },
-	    body: JSON.stringify({ email, password }),
-	  });
-	  if (!res.ok) throw new Error('Login failed');
-	  const data = await res.json();
-	  setToken(data.token);
-	  updateAuthUI();
-	  window.location.href = 'booking.html';
+	  try {
+	    const res = await fetch(`${USER_SERVICE}/auth/login`, {
+	      method: 'POST',
+	      headers: { 'Content-Type': 'application/json' },
+	      body: JSON.stringify({ email, password }),
+	    });
+	    if (!res.ok) {
+	      const error = await res.json().catch(() => ({}));
+	      throw new Error(error.message || 'Login failed');
+	    }
+	    const data = await res.json();
+	    setToken(data.token);
+	    updateAuthUI();
+	    window.location.href = 'booking.html';
+	  } catch (err) {
+	    console.error('Login error:', err);
+	    throw err;
+	  }
 	}
 
   // --- DISPONIBILITES LOGIC ---
 	async function fetchDisponibilites() {
-	  const res = await fetch(`${DISPONIBILITE_SERVICE}/disponibilites`);
-	  if (!res.ok) throw new Error('Failed to fetch slots');
-	  return res.json();
+	  try {
+	    // Always fetch fresh data from the server - no caching
+	    const slotsRes = await fetch(`${DISPONIBILITE_SERVICE}/disponibilites`, {
+	      method: 'GET',
+	      headers: {
+	        'Cache-Control': 'no-cache, no-store, must-revalidate',
+	        'Pragma': 'no-cache',
+	        'Expires': '0',
+	        'Accept': 'application/json'
+	      }
+	    });
+	    if (!slotsRes.ok) throw new Error('Failed to fetch slots');
+	    const slots = await slotsRes.json();
+
+	    // Then check active reservations if user is logged in
+	    if (getToken()) {
+	      const reservationsRes = await fetch(`${RESERVATION_SERVICE}/rendezvous`, {
+	        headers: authHeaders(),
+	        cache: 'no-store' // Ensures fresh data
+	      });
+	      if (reservationsRes.ok) {
+	        const reservations = await reservationsRes.json();
+	        
+	        // Filter out slots that are either reserved or already booked by this user
+	        return slots.filter(slot => {
+	          const hasActiveReservation = reservations.some(res => 
+	            res.disponibilite_id === slot.id && 
+	            !res.is_cancelled
+	          );
+	          return !slot.is_reserved && !hasActiveReservation;
+	        });
+	      }
+	    }
+
+	    // For non-authenticated users, only return non-reserved slots
+	    return slots.filter(slot => !slot.is_reserved);
+	  } catch (err) {
+	    console.error('Error fetching availabilities:', err);
+	    throw new Error('Failed to fetch available slots');
+	  }
 	}
 
 	// Make sure to load user reservations when page loads
@@ -311,7 +379,9 @@ jQuery(document).ready(function($) {
 	  if (document.getElementById('userReservations')) {
 	    loadUserReservations();
 	  }
-	});	function renderDisponibilites(slots, container) {
+	});
+	
+	function renderDisponibilites(slots, container) {
 	  container.innerHTML = '';
 	  if (!slots.length) {
 	    container.innerHTML = '<p>No available slots.</p>';
@@ -329,28 +399,47 @@ jQuery(document).ready(function($) {
 	  });
 	  
 	  slots.forEach(slot => {
-	    if (!slot.is_reserved) {
-	      const tr = document.createElement('tr');
-	      const date = new Date(slot.date).toLocaleDateString();
-	      tr.innerHTML = `
-	        <td>${date}</td>
-	        <td>${slot.heure}</td>
-	        <td><span class="badge badge-success">Available</span></td>
-	        <td><button type="button" class="btn btn-primary btn-sm" data-id="${slot.id}" data-date="${slot.date}" data-heure="${slot.heure}">Book</button></td>
-	      `;
-	      table.appendChild(tr);
-	    }
+	    const tr = document.createElement('tr');
+	    const date = new Date(slot.date);
+	    const formattedDate = date.toLocaleDateString();
+	    const isoDate = date.toISOString().split('T')[0]; // For the data attribute
+	    tr.innerHTML = `
+	      <td>${formattedDate}</td>
+	      <td>${slot.heure}</td>
+	      <td><span class="badge badge-success">Available</span></td>
+	      <td><button type="button" class="btn btn-primary btn-sm" data-id="${slot.id}" data-date="${isoDate}" data-heure="${slot.heure}">Book</button></td>
+	    `;
+	    table.appendChild(tr);
 	  });
 	  container.appendChild(table);
 	}
 	async function refreshUI() {
-	  // Refresh both available slots and user appointments
-	  const container = document.getElementById('disponibilitesContainer');
-	  if (container) {
-	    const slots = await fetchDisponibilites();
-	    renderDisponibilites(slots, container);
+	  try {
+	    // Show loading state
+	    const container = document.getElementById('disponibilitesContainer');
+	    const userReservationsContainer = document.getElementById('userReservations');
+	    
+	    if (container) {
+	      container.innerHTML = '<p>Refreshing available slots...</p>';
+	    }
+	    if (userReservationsContainer) {
+	      userReservationsContainer.innerHTML = '<p>Refreshing your appointments...</p>';
+	    }
+
+	    // Fetch fresh data in parallel
+	    const [slots, _] = await Promise.all([
+	      fetchDisponibilites(),
+	      loadUserReservations() // This will update the userReservations container
+	    ]);
+
+	    // Update available slots
+	    if (container) {
+	      renderDisponibilites(slots, container);
+	    }
+	  } catch (err) {
+	    console.error('Error refreshing UI:', err);
+	    alert('Failed to refresh the page. Please try again.');
 	  }
-	  await loadUserReservations();
 	}
 
 	function loadBookingUI() {
@@ -360,46 +449,117 @@ jQuery(document).ready(function($) {
 	    renderDisponibilites(slots, container);
 	    container.onclick = async e => {
 	      if (e.target.tagName === 'BUTTON') {
-	        if (e.preventDefault) e.preventDefault();
+	        e.preventDefault();
+	        
+	        // Get booking details
 	        const button = e.target;
 	        const slotId = button.getAttribute('data-id');
 	        const date = button.getAttribute('data-date');
 	        const heure = button.getAttribute('data-heure');
-	        const service = prompt('Enter service (e.g. Haircut):');
+	        
+	        // Check authentication
 	        const token = getToken();
-	        if (!token) return alert('You must be logged in.');
-	        // Disable booking if already booked
-	        const userReservations = await fetchUserReservations();
-	        if (userReservations.some(r => r.disponibilite_id == slotId && !r.is_cancelled)) {
-	          alert('You have already booked this slot.');
+	        if (!token) {
+	          alert('You must be logged in.');
 	          return;
 	        }
+	        
+	        // Get service details
+	        const service = prompt('Enter service (e.g. Haircut):');
+	        if (!service) return; // User cancelled service input
+	        
 	        try {
-	          await bookRendezVous({ date, heure, service, disponibilite_id: Number(slotId) });
+	          // Check if user already has this slot booked
+	          const userReservations = await fetchUserReservations();
+	          if (userReservations.some(r => r.disponibilite_id === Number(slotId) && !r.is_cancelled)) {
+	            alert('You have already booked this slot.');
+	            return;
+	          }
+	          
+	          // Disable the button while booking
+	          const button = e.target;
+	          button.disabled = true;
+	          button.textContent = 'Booking...';
+	          
+	          // Attempt booking
+	          await bookRendezVous({ 
+	            date, 
+	            heure, 
+	            service, 
+	            disponibilite_id: Number(slotId) 
+	          });
+	          
 	          alert('Booking successful!');
-	          await refreshUI(); // Refresh both lists
-	          loadUserReservations();
+	          await refreshUI(); // Refresh available slots
+	          await loadUserReservations(); // Refresh user's appointments
 	        } catch (err) {
-	          alert('Booking failed: ' + err.message);
+	          console.error('Booking error:', err);
+	          button.disabled = false;
+	          button.textContent = 'Book';
+	          
+	          // Determine the specific error case
+	          if (err.message.includes('already reserved')) {
+	            alert('Sorry, this time slot is already reserved. The page will refresh to show current availability.');
+	          } else if (err.message.includes('not found')) {
+	            alert('This slot is no longer available. The page will refresh to show current availability.');
+	          } else {
+	            alert('Booking failed: ' + err.message);
+	          }
+	          
+	          // Always refresh to show current state
+	          try {
+	            await refreshUI();
+	          } catch (refreshErr) {
+	            console.error('Failed to refresh UI after booking error:', refreshErr);
+	            alert('Please refresh the page manually to see the latest availability.');
+	          }
 	        }
 	      }
 	    };
 	  });
 	}
-
-	// --- RESERVATION LOGIC ---
 	async function bookRendezVous({ date, heure, service, disponibilite_id }) {
 	  const token = getToken();
 	  if (!token) throw new Error('Not authenticated');
+	  
 	  try {
+	    // First check - verify slot is available by getting all slots
+	    const checkRes = await fetch(`${DISPONIBILITE_SERVICE}/disponibilites`, {
+	      method: 'GET',
+	      headers: {
+	        'Cache-Control': 'no-cache, no-store, must-revalidate',
+	        'Pragma': 'no-cache',
+	        'Expires': '0'
+	      }
+	    });
+	    
+	    if (!checkRes.ok) {
+	      throw new Error('Failed to verify slot availability');
+	    }
+	    
+	    const slots = await checkRes.json();
+	    const slot = slots.find(s => s.id === disponibilite_id);
+	    
+	    if (!slot) {
+	      throw new Error('Slot not found - it may have been removed');
+	    }
+	  
+	    // Verify the slot exists and is not reserved
+	    if (slot.is_reserved) {
+	      throw new Error('This time slot has already been reserved by another client');
+	    }
+	    // Second check - attempt to make reservation, which will do another availability check
 	    const res = await fetch(`${RESERVATION_SERVICE}/rendezvous`, {
 	      method: 'POST',
 	      headers: {
 	        'Content-Type': 'application/json',
-	        'Authorization': 'Bearer ' + token
+	        'Authorization': 'Bearer ' + token,
+	        'Cache-Control': 'no-cache, no-store, must-revalidate',
+	        'Pragma': 'no-cache'
 	      },
 	      body: JSON.stringify({ date, heure, service, disponibilite_id }),
 	    });
+	    
 	    if (!res.ok) {
 	      let errorMsg = res.statusText;
 	      try {
@@ -408,10 +568,13 @@ jQuery(document).ready(function($) {
 	      } catch {}
 	      throw new Error(errorMsg || 'Booking failed');
 	    }
-	    return res.json();
+	    
+	    const result = await res.json();
+	    // Immediately refresh UI to show updated availability
+	    await refreshUI();
+	    return result;
 	  } catch (err) {
 	    console.error('Booking error:', err);
-	    alert('Booking failed: ' + err.message);
 	    throw err;
 	  }
 	}
@@ -520,7 +683,7 @@ jQuery(document).ready(function($) {
 	  const res = await fetch(`${DISPONIBILITE_SERVICE}/disponibilites`, {
 	    method: 'POST',
 	    headers: authHeaders(),
-	    body: JSON.stringify({ date, heure }),
+	    body: JSON.stringify({ date, heure, is_reserved: false }),
 	  });
 	  if (!res.ok) throw new Error('Failed to add slot');
 	  return res.json();
@@ -573,12 +736,10 @@ jQuery(document).ready(function($) {
 	        method: 'POST',
 	        headers: {
 	          'Content-Type': 'application/json',
-	          'Authorization': 'Bearer ' + token
+	          'Authorization': 'Bearer ' + token,
+	          'Cache-Control': 'no-cache'
 	        },
-
-
-			
-	        body: JSON.stringify({ date, heure })
+	        body: JSON.stringify({ date, heure, is_reserved: false })
 	      });
 	      if (!res.ok) {
 	        let errorMsg = res.statusText;
@@ -597,7 +758,16 @@ jQuery(document).ready(function($) {
 	      messageDiv.classList.add('alert-success');
 	      messageDiv.style.display = 'block';
 	      document.getElementById('addSlotForm').reset();
-	      loadBookingUI();
+	      
+	      // Force immediate UI refresh with fresh data
+	      const container = document.getElementById('disponibilitesContainer');
+	      if (container) {
+	        container.innerHTML = '<p>Refreshing available slots...</p>';
+	        // Add a small delay to allow the backend to update
+	        await new Promise(resolve => setTimeout(resolve, 1000));
+	        const slots = await fetchDisponibilites();
+	        renderDisponibilites(slots, container);
+	      }
 	    } catch (err) {
 	      console.error(err);
 	      messageDiv.textContent = err.message || 'Failed to add time slot';
@@ -607,6 +777,23 @@ jQuery(document).ready(function($) {
 	    }
 	  };
 	}
+
+	// Initialize booking UI when page loads
+	document.addEventListener('DOMContentLoaded', () => {
+	  if (document.getElementById('disponibilitesContainer')) {
+	    loadBookingUI();
+	  }
+	});
+
+	// Fix error handling for booking
+	document.addEventListener('DOMContentLoaded', () => {
+	  if (document.getElementById('disponibilitesContainer')) {
+	    loadBookingUI().catch(err => {
+	      console.error('Failed to load booking UI:', err);
+	      alert('Error loading available slots. Please refresh the page.');
+	    });
+	  }
+	});
 
 	// --- UI HOOKUP (EXAMPLES) ---
 	// Login/Register
@@ -697,7 +884,7 @@ jQuery(document).ready(function($) {
 	}
 	// Responsive: Use CSS media queries in your HTML/CSS for mobile/desktop layout
 
-});
+}); // End of jQuery document ready handler
 
 // --- UI TOGGLE ---
 function updateAuthUI() {
@@ -727,21 +914,23 @@ function updateAuthUI() {
   
   // Load data if authenticated
   if (token) {
-    loadBookingUI();
-    loadUserReservations();
-  }
-  
-  if (token) {
-    loadBookingUI();
-    loadUserReservations();
+    try {
+      loadBookingUI();
+      loadUserReservations();
+    } catch (err) {
+      console.error('Error loading UI:', err);
+    }
   }
 }
+
+// Initialize event listeners
 document.addEventListener('DOMContentLoaded', updateAuthUI);
 window.addEventListener('storage', updateAuthUI);
 
-// Enforce protected page redirect
-if (window.location.pathname.endsWith('booking.html')) {
-  if (!getToken()) {
+// Handle page protection
+function checkProtectedPage() {
+  if (window.location.pathname.endsWith('booking.html') && !getToken()) {
     window.location.href = 'index.html';
   }
 }
+document.addEventListener('DOMContentLoaded', checkProtectedPage);
